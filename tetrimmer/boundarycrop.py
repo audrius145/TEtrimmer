@@ -42,6 +42,7 @@ from MSAcluster import CleanAndSelectColumn, clean_and_cluster_MSA, process_msa
 
 from orfdomain import PlotPfam, determine_sequence_direction
 from TEaid import TEAid
+from TSD_check import find_tsd, format_tsd
 
 
 def reset_bed(input_file, output_dir):
@@ -1301,6 +1302,27 @@ def find_boundary_and_crop(
         final_raw_start = column_mapping_initial[final_start]
         final_raw_end = column_mapping_initial[final_end]
 
+        # Look for target site duplications next to the defined boundaries in the raw MSA
+        # The TSD search is not mandatory, skip it if any error occurred
+        tsd_result = None
+        try:
+            tsd_result = find_tsd(
+                bed_fasta_mafft_with_gap,
+                final_raw_start,
+                column_mapping_initial[final_end - 1] + 1
+            )
+        except Exception as e:
+            with open(error_files, 'a') as f:
+                # Get the traceback content as a string
+                tb_content = traceback.format_exc()
+                f.write(f'\nTSD search failed for {seq_name} with error:\n{e}')
+                f.write('\n' + tb_content + '\n\n')
+            logging.error(f'\nTSD search failed for {seq_name} with error:\n{e}')
+            logging.warning(
+                '\nThis error will not affect the final consensus sequence, you can choose to ignore it. '
+                "For traceback text, please refer to 'error_file.txt' in the 'Multiple_sequence_alignment' folder.\n"
+            )
+
         # Define the genome blast coverage for bed_fasta_mafft_boundary_crop_for_select
         blast_cov_list_dic = {
             "boundary_start": str(final_start),
@@ -1600,6 +1622,9 @@ def find_boundary_and_crop(
 
         # Update the consi_obj final raw file start and end position
         consi_obj.set_output_raw_start_and_end(final_raw_start, final_raw_end)
+
+        # Store the TSD search result into consi_obj
+        consi_obj.set_tsd(format_tsd(tsd_result, reverse_complement))
 
     except Exception as e:
         with open(error_files, 'a') as f:
