@@ -19,6 +19,7 @@ from functions import (
     filter_out_big_gap_seq,
     muscle_align,
     remove_gaps_with_similarity_check,
+    select_alignment_columns,
     select_gaps_block_with_similarity_check,
 )
 
@@ -164,11 +165,9 @@ class CleanAndSelectColumn:
         if (
             divergence_len > min_length
         ):  # Set the threshold number to decide if performing clustering
-            self.alignment_filtered = self.alignment[
-                :, columns_to_keep[0] : columns_to_keep[0] + 1
-            ]
-            for i in columns_to_keep[1:]:
-                self.alignment_filtered += self.alignment[:, i : i + 1]
+            self.alignment_filtered = select_alignment_columns(
+                self.alignment, columns_to_keep
+            )
         else:
             self.if_need_cluster = (
                 False  # Use this value to decide if executing "Class_group_MSA"

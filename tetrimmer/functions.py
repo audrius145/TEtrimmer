@@ -932,6 +932,28 @@ def remove_short_seq(input_file, output_file, threshold=0.1):
     AlignIO.write(filtered_alignment, output_file)
 
 
+def select_alignment_columns(alignment, columns):
+    """
+    Build a new MSA that contains only the selected columns.
+    :param alignment: MultipleSeqAlignment object
+    :param columns: list of int, 0-based indices of the columns to keep
+    :return: MultipleSeqAlignment object with the selected columns
+    """
+    selected_records = []
+    for record in alignment:
+        sequence = str(record.seq)
+        selected_sequence = ''.join([sequence[i] for i in columns])
+        selected_records.append(
+            SeqRecord(
+                Seq(selected_sequence),
+                id=record.id,
+                name=record.name,
+                description=record.description,
+            )
+        )
+    return MultipleSeqAlignment(selected_records)
+
+
 def remove_gaps(input_file, output_dir, threshold=0.8, min_nucleotide=5):
     """
     Remove gaps if the gap percentage is above threshold. Remove columns if nucleotide number is less than 5.
@@ -974,9 +996,7 @@ def remove_gaps(input_file, output_dir, threshold=0.8, min_nucleotide=5):
     # Adding one more value to correct index
     column_mapping[len(keep_list)] = column_mapping[len(keep_list) - 1] + 1
     # Keep the columns if they meet requirements
-    MSA_mafft_filtered = MSA_mafft[:, keep_list[0] : keep_list[0] + 1]
-    for i in keep_list[1:]:
-        MSA_mafft_filtered += MSA_mafft[:, i : i + 1]
+    MSA_mafft_filtered = select_alignment_columns(MSA_mafft, keep_list)
 
     # Write the filtered MSA to the output file
     with open(fasta_out_flank_mafft_gap_filter_file, 'w') as f:
@@ -1161,9 +1181,7 @@ def remove_gaps_with_similarity_check(
     column_mapping[len(keep_list)] = column_mapping[len(keep_list) - 1] + 1
 
     # Keep the columns
-    MSA_mafft_filtered = MSA_mafft[:, keep_list[0] : keep_list[0] + 1]
-    for i in keep_list[1:]:
-        MSA_mafft_filtered += MSA_mafft[:, i : i + 1]
+    MSA_mafft_filtered = select_alignment_columns(MSA_mafft, keep_list)
 
     # Write the filtered MSA to the output file
     with open(fasta_out_flank_mafft_gap_filter_file, 'w') as f:
