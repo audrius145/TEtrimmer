@@ -381,7 +381,17 @@ def scan_flanks(flanks, max_shift=10, min_len=2, max_len=20):
     return best
 
 
-def find_tsd(msa_file, start, end, anchor=True, max_shift=10, min_len=2, max_len=20, max_p_value=0.001):
+def find_tsd(
+    msa_file,
+    start,
+    end,
+    anchor=True,
+    consensus_column_list=None,
+    max_shift=10,
+    min_len=2,
+    max_len=20,
+    max_p_value=0.001,
+):
     """
     Look for target site duplications (TSDs) next to the TE boundaries of an MSA.
 
@@ -389,6 +399,8 @@ def find_tsd(msa_file, start, end, anchor=True, max_shift=10, min_len=2, max_len
     :param start: int, first MSA column of the TE (0-based)
     :param end: int, MSA column after the last column of the TE
     :param anchor: bool, move the boundaries to the edges of the conserved block before the TSD search. Default: True
+    :param consensus_column_list: list of int, MSA columns that remain after gap removal. They are calculated from
+    the MSA if this is None. Default: None
     :param max_shift: int, maximum number of nucleotides each boundary is moved to look for TSDs. Default: 10
     :param min_len: int, minimum TSD length. Default: 2
     :param max_len: int, maximum TSD length. Default: 20
@@ -423,12 +435,29 @@ def find_tsd(msa_file, start, end, anchor=True, max_shift=10, min_len=2, max_len
     result['end'] = used_end
     result['start_edge'] = start_edge
     result['end_edge'] = end_edge
-    in_consensus = consensus_columns(msa)
+    if consensus_column_list is None:
+        in_consensus = consensus_columns(msa)
+    else:
+        in_consensus = np.zeros(msa.shape[1], dtype=bool)
+        in_consensus[consensus_column_list] = True
     result['start_moved'] = int(in_consensus[start:used_start].sum() - in_consensus[used_start:start].sum())
     result['end_moved'] = int(in_consensus[end:used_end].sum() - in_consensus[used_end:end].sum())
     result['complete_sequences'] = len(complete_flanks)
     result['copy_n'] = len(flanks)
     return result
+
+
+def boundary_moves(result):
+    """
+    Calculate how far the given boundaries are away from the TSDs.
+
+    :param result: dictionary from find_tsd
+    :return: tuple, number of consensus positions between the given left boundary and the TSDs and the same for the
+    right boundary. Positive numbers point to the right
+    """
+    left_move = result['start_moved'] + result['left_shift']
+    right_move = result['end_moved'] + result['right_shift']
+    return left_move, right_move
 
 
 def format_tsd(result, reverse_complement=False):
@@ -438,16 +467,15 @@ def format_tsd(result, reverse_complement=False):
     :param result: dictionary from find_tsd, None if the TSD search failed
     :param reverse_complement: bool, True if the MSA was reverse complemented after the TSD search. Default: False
     :return: str, 'NaN' if TSDs could not be tested and 'False' if no TSDs are found. Otherwise the TSD length, the
-    number of copies with TSDs out of the tested copies and the number of nucleotides the left and right boundary
-    have to be moved to be next to the TSDs, like '5bp;22/29;+0/-3'. Positive numbers point to the right
+    number of copies with TSDs out of the tested copies and the number of nucleotides between the given left and
+    right boundary and the TSDs, like '5bp;22/29;+0/-3'. Positive numbers point to the right
     """
     if result is None or not result['tested']:
         return 'NaN'
     if not result['found']:
         return 'False'
 
-    left_move = result['start_moved'] + result['left_shift']
-    right_move = result['end_moved'] + result['right_shift']
+    left_move, right_move = boundary_moves(result)
     if reverse_complement:
         left_move, right_move = -right_move, -left_move
     return f"{result['tsd_len']}bp;{result['support']}/{result['copy_n']};{left_move:+d}/{right_move:+d}"
