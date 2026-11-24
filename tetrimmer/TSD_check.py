@@ -178,7 +178,7 @@ def anchor_boundaries(msa, start, end):
 
 
 def collect_flanks(
-    ids, msa, start, end, flank_len=30, terminal_win=30, min_terminal_identity=0.6
+    ids, msa, start, end, flank_len=30, terminal_win=30, min_terminal_identity=0.6, max_edge_gap=3
 ):
     """
     Extract the genomic sequences directly left and right of the TE for each sequence of the MSA.
@@ -192,6 +192,8 @@ def collect_flanks(
     :param terminal_win: int, number of columns at each TE end used to check if a sequence contains this end. Default: 30
     :param min_terminal_identity: float (0-1), minimum proportion of the terminal columns in which a sequence has to
     be identical with the most abundant nucleotide. Default: 0.6
+    :param max_edge_gap: int, the aligner can place the terminal nucleotides of a TE copy outside the TE, which
+    leaves gaps in the terminal TE columns. Up to this number of nucleotides are returned to the TE. Default: 3
     :return: list of tuples (sequence id, left flank, TE sequence, right flank). Sequences are upper case without gaps
     """
     te = msa[:, start:end]
@@ -218,6 +220,27 @@ def collect_flanks(
         left_flank = row[:start][row[:start] != b'-'].tobytes().decode()
         te_seq = row[start:end][row[start:end] != b'-'].tobytes().decode()
         right_flank = row[end:][row[end:] != b'-'].tobytes().decode()
+
+        # Count the gaps of this sequence in the first and in the last TE columns
+        left_gap_n = 0
+        while left_gap_n < max_edge_gap and row[start:end][left_columns[left_gap_n]] == b'-':
+            left_gap_n += 1
+        right_gap_n = 0
+        while right_gap_n < max_edge_gap and row[start:end][right_columns[-1 - right_gap_n]] == b'-':
+            right_gap_n += 1
+
+        # Return the nucleotides next to the TE if they are identical with the nucleotides missing in these columns
+        if left_gap_n > 0:
+            missing = b''.join(majority[left_columns[:left_gap_n]]).decode()
+            if left_flank.endswith(missing):
+                te_seq = missing + te_seq
+                left_flank = left_flank[:-left_gap_n]
+        if right_gap_n > 0:
+            missing = b''.join(majority[right_columns[len(right_columns) - right_gap_n :]]).decode()
+            if right_flank.startswith(missing):
+                te_seq = te_seq + missing
+                right_flank = right_flank[right_gap_n:]
+
         if len(left_flank) < flank_len or len(right_flank) < flank_len:
             continue
         flanks.append((seq_id, left_flank, te_seq, right_flank))
