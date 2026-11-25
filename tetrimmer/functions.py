@@ -816,7 +816,7 @@ def align_sequences(input_file, output_dir, max_run_time=3600):
                 break
 
     # Construct the command as a list of strings
-    mafft_cmd = ['mafft', '--quiet', '--nuc', '--retree', '1', input_file]
+    mafft_cmd = ['mafft', '--quiet', '--nuc', '--retree', '2', input_file]
 
     # If any of the top 5 sequences are longer than 10000, add --memsave to save memory
     if long_sequences:
