@@ -1185,7 +1185,8 @@ def analyze_sequence(
             min_length=min_blast_len,
             seq_obj=seq_obj,
             search_type=engine,
-            max_run_time=max_thread_time
+            max_run_time=max_thread_time,
+            join_hits=True
         )
 
         seq_obj.update_blast_hit_n(blast_hits_count)

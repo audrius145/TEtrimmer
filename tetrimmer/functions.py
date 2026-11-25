@@ -250,6 +250,115 @@ def fasta_file_to_dict(input_file, separate_name=False):
     return sequences
 
 
+def join_blast_hits(blast_df, max_insertion=1000, max_overlap=100, query_length=None):
+    """
+    Join BLAST hits that belong to the same genomic copy of the query.
+    BLAST reports one copy as several hits when the copy has insertions or deletions compared with the query.
+    Two hits on the same strand of the same sequence are joined when the second one continues the first one in the
+    query and in the genome, and the genome has at most max_insertion nucleotides between them that the query does
+    not have.
+
+    :param blast_df: DataFrame, BLAST table with the columns qseqid, sseqid, pident, length, mismatch, gapopen,
+    qstart, qend, sstart, send, sstrand, evalue and qcovhsp in this order
+    :param max_insertion: int, maximum number of nucleotides between two joined hits in the genome that are not
+    explained by their distance in the query. Default: 1000
+    :param max_overlap: int, maximum overlap of two joined hits in the query or in the genome. Default: 100
+    :param query_length: int, length of the query, used for the query coverage of joined hits. When it is not given,
+    joined hits get the highest query coverage of their hits
+    :return: tuple, list with one row of BLAST table values for each copy, and list with the row positions in
+    blast_df of the hits of each copy. Copies are in the order of their first hit in blast_df
+    """
+    hits = [list(row) for row in blast_df.itertuples(index=False, name=None)]
+    if not hits:
+        return [], []
+
+    # Positions along the copy. Genomic positions are negative on the minus strand, so they increase together with
+    # the query positions on both strands
+    positions = [
+        (-hit[8], -hit[9]) if hit[10] == 'minus' else (hit[8], hit[9]) for hit in hits
+    ]
+    max_query_end = max(hit[7] for hit in hits)
+
+    # Go through the hits of each sequence and strand along the genome and add each hit to the nearest copy that it
+    # continues, or start a new copy
+    copies = []
+    open_copies = []
+    previous_key = None
+    for i in sorted(range(len(hits)), key=lambda i: (str(hits[i][0]), str(hits[i][1]), hits[i][10], positions[i])):
+        key = (hits[i][0], hits[i][1], hits[i][10])
+        start, end = positions[i]
+        if key != previous_key:
+            open_copies = []
+            previous_key = key
+
+        # Copies that end too far away cannot be continued by this hit or by later hits
+        open_copies = [
+            copy_hits for copy_hits in open_copies
+            if positions[copy_hits[-1]][1] >= start - max_query_end - max_insertion - 1
+        ]
+
+        nearest_copy = None
+        nearest_gap = None
+        for copy_hits in open_copies:
+            last = copy_hits[-1]
+            genome_gap = start - positions[last][1] - 1
+            query_gap = hits[i][6] - hits[last][7] - 1
+            if genome_gap < -max_overlap or query_gap < -max_overlap:
+                continue
+            if end <= positions[last][1] or hits[i][7] <= hits[last][7]:
+                continue
+            if genome_gap > max(query_gap, 0) + max_insertion:
+                continue
+            if nearest_copy is None or genome_gap < nearest_gap:
+                nearest_copy = copy_hits
+                nearest_gap = genome_gap
+
+        if nearest_copy is None:
+            nearest_copy = []
+            copies.append(nearest_copy)
+            open_copies.append(nearest_copy)
+        nearest_copy.append(i)
+
+    copies.sort(key=min)
+
+    joined_rows = []
+    for copy_hits in copies:
+        if len(copy_hits) == 1:
+            joined_rows.append(hits[copy_hits[0]])
+            continue
+
+        first = hits[copy_hits[0]]
+        last = hits[copy_hits[-1]]
+        aligned_length = sum(hits[i][3] for i in copy_hits)
+        identity = sum(hits[i][2] * hits[i][3] for i in copy_hits) / aligned_length
+        query_overlap = sum(
+            max(0, hits[a][7] - hits[b][6] + 1) for a, b in zip(copy_hits, copy_hits[1:])
+        )
+        if query_length:
+            covered_length = sum(hits[i][7] - hits[i][6] + 1 for i in copy_hits) - query_overlap
+            query_coverage = min(100, int(100 * covered_length / query_length + 0.5))
+        else:
+            query_coverage = max(hits[i][12] for i in copy_hits)
+
+        joined_rows.append([
+            first[0],
+            first[1],
+            round(identity, 3),
+            aligned_length - query_overlap,
+            sum(hits[i][4] for i in copy_hits),
+            sum(hits[i][5] for i in copy_hits),
+            first[6],
+            last[7],
+            first[8],
+            last[9],
+            first[10],
+            min(hits[i][11] for i in copy_hits),
+            query_coverage
+        ])
+
+    return joined_rows, copies
+
+
 def blast(
     seq_file,
     blast_database_path,
@@ -261,7 +370,8 @@ def blast(
     blast_qcov_hsp_perc=15,
     evalue='1e-40',
     mmseqs_database_dir = None,
-    max_run_time=3600
+    max_run_time=3600,
+    join_hits=False
 ):
     """
     Runs BLAST calling a specified task type and saves the results as a BED file.
@@ -274,6 +384,8 @@ def blast(
     :param min_length: int, minimum alignment length. Default: 150
     :param task: str, BLAST task type ("blastn", "dc-megablast", etc.). Default: "blastn"
     :param seq_obj: object (optional), sequence object to update with BLAST hits
+    :param join_hits: boolean, join the BLAST hits of the same genomic copy into one hit. A copy is kept when one of
+    its hits covers blast_qcov_hsp_perc percent of the query. Only used for the search type "blast". Default: False
     :return: tuple, output BED file name and BLAST hit count for each sequence
     """
     input_file = seq_file
@@ -294,11 +406,17 @@ def blast(
         raise Exception
 
     if search_type == 'blast':
+        # When hits are joined, the query coverage is checked for each copy after joining
+        if join_hits:
+            qcov_option = ''
+        else:
+            qcov_option = f'-qcov_hsp_perc {blast_qcov_hsp_perc} '
+
         # Modify the blast command to include the specified task
         blast_cmd = (
             f'blastn -max_target_seqs 10000 -query {input_file} -db {blast_database_path} '
             f'-outfmt "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send sstrand evalue qcovhsp" '
-            f'-evalue {evalue} -qcov_hsp_perc {blast_qcov_hsp_perc} | '
+            f'-evalue {evalue} {qcov_option}| '
             f'awk -v ml={min_length} \'BEGIN{{OFS="\\t"}} $4 > ml {{print $0}}\' > {blast_out_file}'
         )
 
@@ -329,6 +447,26 @@ def blast(
         except subprocess.TimeoutExpired as e:
             logging.error(f"BLAST execution timed out after {max_run_time} seconds for {os.path.basename(input_file)}!")
             raise e
+
+        if join_hits and file_exists_and_not_empty(blast_out_file):
+            with open(blast_out_file) as f:
+                blast_lines = f.read().splitlines()
+            blast_df = pd.read_csv(blast_out_file, sep='\t', header=None)
+            query_length = sum(len(record.seq) for record in SeqIO.parse(input_file, 'fasta'))
+            joined_rows, copies = join_blast_hits(blast_df, query_length=query_length)
+
+            with open(blast_out_file, 'w') as f:
+                for row, copy_hits in zip(joined_rows, copies):
+                    if max(blast_df.iat[i, 12] for i in copy_hits) < blast_qcov_hsp_perc:
+                        continue
+
+                    # Hits that are not joined are written as BLAST reported them
+                    if len(copy_hits) == 1:
+                        f.write(blast_lines[copy_hits[0]] + '\n')
+                    else:
+                        row[2] = f'{row[2]:.3f}'
+                        row[11] = '0.0' if row[11] == 0 else f'{row[11]:.2e}'
+                        f.write('\t'.join(str(value) for value in row) + '\n')
 
     elif search_type == 'mmseqs':
         # MMseqs2 search
@@ -3660,6 +3798,15 @@ def check_blast_full_length(
         # If "if_low_copy" is 'False', the sequence is not a low copy element. seq_obj is consi_obj (see "seqclass.py").
         seq_length = seq_obj.new_length
 
+    # Total hits (raw lines in BLAST output)
+    all_blast_hit_n = df.shape[0]
+
+    # A copy that BLAST reported as several hits is one hit for the full-length check. The MMseqs2 output has fewer
+    # columns and is used as it is
+    if df.shape[1] == 13:
+        joined_rows, _ = join_blast_hits(df)
+        df = pd.DataFrame(joined_rows)
+
     identity_condition = df[2] > identity
     coverage_condition = df[3] / seq_length >= coverage
     length_condition = df[3] > min_hit_length
@@ -3667,9 +3814,6 @@ def check_blast_full_length(
     # Filter the DataFrame
     filtered_df = df[identity_condition & coverage_condition & length_condition]
     blast_full_length_n = filtered_df.shape[0]
-
-    # Total hits (raw lines in BLAST output)
-    all_blast_hit_n = df.shape[0]
 
     return all_blast_hit_n, blast_full_length_n
 
