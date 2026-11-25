@@ -42,6 +42,7 @@ from MSAcluster import CleanAndSelectColumn, clean_and_cluster_MSA, process_msa
 
 from orfdomain import PlotPfam, determine_sequence_direction
 from TEaid import TEAid
+from TSD_check import boundary_moves, find_tsd, format_tsd
 
 
 def reset_bed(input_file, output_dir):
@@ -1213,6 +1214,42 @@ def find_boundary_and_crop(
         )
 
     #####################################################################################################
+    # Code block: Check the existence of TSD
+    #####################################################################################################
+    # Look for target site duplications next to the defined boundaries in the raw MSA. If TSDs are found, move
+    # the boundaries next to them
+    # The TSD search is not mandatory, skip it if any error occurred
+    tsd_result = None
+    try:
+        # column_mapping_initial contains one more position than the consensus sequence
+        consensus_column_list = [
+            column_mapping_initial[i] for i in range(len(column_mapping_initial) - 1)
+        ]
+        tsd_result = find_tsd(
+            bed_fasta_mafft_with_gap,
+            column_mapping_initial[final_start],
+            column_mapping_initial[final_end - 1] + 1,
+            consensus_column_list=consensus_column_list
+        )
+
+        if tsd_result['found']:
+            left_move, right_move = boundary_moves(tsd_result)
+            final_start = max(final_start + left_move, 0)
+            final_end = min(final_end + right_move, MSA_length)
+
+    except Exception as e:
+        with open(error_files, 'a') as f:
+            # Get the traceback content as a string
+            tb_content = traceback.format_exc()
+            f.write(f'\nTSD search failed for {seq_name} with error:\n{e}')
+            f.write('\n' + tb_content + '\n\n')
+        logging.error(f'\nTSD search failed for {seq_name} with error:\n{e}')
+        logging.warning(
+            '\nThis error will not affect the final result significantly, you can choose to ignore it. '
+            "For traceback text, please refer to 'error_file.txt' in the 'Multiple_sequence_alignment' folder.\n"
+        )
+
+    #####################################################################################################
     # Code block: Clean the final MSA
     #####################################################################################################
     try:
@@ -1600,6 +1637,9 @@ def find_boundary_and_crop(
 
         # Update the consi_obj final raw file start and end position
         consi_obj.set_output_raw_start_and_end(final_raw_start, final_raw_end)
+
+        # Store the TSD search result into consi_obj
+        consi_obj.set_tsd(format_tsd(tsd_result, reverse_complement))
 
     except Exception as e:
         with open(error_files, 'a') as f:
