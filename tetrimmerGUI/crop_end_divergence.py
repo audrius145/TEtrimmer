@@ -24,8 +24,6 @@ class CropEnd:
         self.alignment = AlignIO.read(self.input_file, 'fasta')
         self.threshold = threshold
         self.window_size = window_size
-        # Define a dictionary the key are sequence names, the values are a list contains nucleotides proportion
-        self.proportions_dict = {record.id: [] for record in self.alignment}
         # Define a dictionary to hold start and end positions
         self.position_dict = {record.id: [0, 0] for record in self.alignment}
         # Define an empty dataframe to store proportion information
@@ -39,46 +37,63 @@ class CropEnd:
         :function pro_calculation: calculate nucleotide proportion in each column of the MSA
         :return: a data frame containing all sequence names and the respective nucleotide proportion information for each position
         """
-        # Loop through each column of the alignment
-        for i in range(self.alignment.get_alignment_length()):
-            # Count the number of each nucleotide in this column
-            counts = {'a': 0, 'c': 0, 'g': 0, 't': 0}
-            for record in self.alignment:
-                nucleotide = record.seq[i].lower()
-                if nucleotide in counts:
-                    counts[nucleotide] += 1
+        # Store the alignment as a matrix. Each row represents a sequence and each column represents a position
+        alignment_matrix = np.array(
+            [
+                np.frombuffer(str(record.seq).encode(), dtype='S1')
+                for record in self.alignment
+            ]
+        )
+        nucleotides = [b'a', b'c', b'g', b't']
 
-            # Calculate the proportion of each nucleotide
-            total = sum(counts.values())
+        # Count the number of each nucleotide in every column
+        counts = np.array(
+            [
+                (
+                    (alignment_matrix == nucleotide)
+                    | (alignment_matrix == nucleotide.upper())
+                ).sum(axis=0)
+                for nucleotide in nucleotides
+            ]
+        )
+        total = counts.sum(axis=0)
 
-            # Generate a dictionary named proportions contains nucleotide proportion for this column
-            if total < 5:  # Ignore columns less 5 nucleotides
-                proportions = {nucleotide: 0 for nucleotide in counts}
-            else:
-                proportions = {
-                    nucleotide: count / total for nucleotide, count in counts.items()
-                }
+        # Calculate the proportion of each nucleotide for every column
+        # Ignore columns less 5 nucleotides
+        proportions = np.zeros(counts.shape)
+        np.divide(counts, total, out=proportions, where=total >= 5)
 
-            # Add the proportion of the nucleotide at this position to each sequence
-            for record in self.alignment:  # This will loop each sequences in alignment
-                nucleotide = record.seq[i]  # Refer to that column
-                if nucleotide in proportions:
-                    # Write proportion information into proportions_dict
-                    self.proportions_dict[record.id].append(proportions[nucleotide])
-                else:
-                    # When there is a gap, use number 0 replace proportion
-                    self.proportions_dict[record.id].append(np.nan)
+        # Add the proportion of the nucleotide at each position to each sequence
+        # When there is a gap, use NaN replace proportion
+        seq_proportions = np.full(alignment_matrix.shape, np.nan)
+        for nucleotide, nucleotide_proportions in zip(nucleotides, proportions):
+            seq_proportions = np.where(
+                alignment_matrix == nucleotide, nucleotide_proportions, seq_proportions
+            )
 
-        # Convert the dictionary to a DataFrame
-        self.df = pd.DataFrame(self.proportions_dict)
-        self.df = (
-            self.df.transpose()
-        )  # transpose the DataFrame so that each row represents a sequence
-        self.df.columns = range(
-            1, self.alignment.get_alignment_length() + 1
-        )  # rename the columns to represent positions
+        # Each row of the DataFrame represents a sequence and the columns represent positions
+        self.df = pd.DataFrame(
+            seq_proportions,
+            index=[record.id for record in self.alignment],
+            columns=range(1, self.alignment.get_alignment_length() + 1),
+        )
         # Convert to two decimal numbers
         self.df = self.df.round(2)
+
+    def candidate_windows(self, cumulative):
+        """
+        Find the windows whose sum of proportions is close to or greater than the threshold.
+
+        :param cumulative: numpy array, cumulative sum of the proportions of one sequence in hundredths, starts with 0
+        :return: numpy array containing the start positions of the windows in ascending order
+        """
+        window_number = max(len(cumulative) - self.window_size, 0)
+        window_sums = (
+            cumulative[self.window_size : self.window_size + window_number]
+            - cumulative[:window_number]
+        )
+        # Keep a margin of one hundredth. The window sum itself is compared with the threshold afterwards
+        return np.flatnonzero(window_sums > self.threshold * 100 - 1)
 
     def find_positions(self):
         """
@@ -89,19 +104,25 @@ class CropEnd:
         """
         # Loop over the DataFrame's rows
         for index, row in self.df.iterrows():
+            # Gaps do not contribute to the sum of a window
+            proportions = row.fillna(0).to_numpy()
+            # The proportions have two decimals, their cumulative sum is exact when counted in hundredths
+            cumulative = np.concatenate(
+                ([0], np.rint(proportions * 100).astype(int).cumsum())
+            )
+            candidates = self.candidate_windows(cumulative)
+
             # Find start position
-            for i in range(len(row) - self.window_size + 1):
-                window = row[i : i + self.window_size]
+            for i in candidates:
+                window = proportions[i : i + self.window_size]
                 if window.sum() > self.threshold:
-                    self.position_dict[index][0] = i
+                    self.position_dict[index][0] = int(i)
                     break
             # Find end position
-            for i in range(len(row) - 1, self.window_size - 2, -1):
-                window = row[i - self.window_size + 1 : i + 1]
+            for i in candidates[::-1]:
+                window = proportions[i : i + self.window_size]
                 if window.sum() > self.threshold:
-                    self.position_dict[index][1] = (
-                        i + 1
-                    )  # add 1 to make the position 1-indexed
+                    self.position_dict[index][1] = int(i) + self.window_size
                     break
 
     def crop_alignment(self):

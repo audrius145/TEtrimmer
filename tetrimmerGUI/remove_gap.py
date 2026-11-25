@@ -2,6 +2,9 @@ import os
 
 import click
 from Bio import AlignIO
+from Bio.Align import MultipleSeqAlignment
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
 
 
 def calc_conservation(col):
@@ -81,9 +84,19 @@ def remove_gaps_with_similarity_check(
         column_mapping[len(keep_list)] = column_mapping[len(keep_list) - 1] + 1
 
         # Keep the columns
-        MSA_mafft_filtered = MSA_mafft[:, keep_list[0] : keep_list[0] + 1]
-        for i in keep_list[1:]:
-            MSA_mafft_filtered += MSA_mafft[:, i : i + 1]
+        filtered_records = []
+        for record in MSA_mafft:
+            sequence = str(record.seq)
+            filtered_sequence = ''.join([sequence[i] for i in keep_list])
+            filtered_records.append(
+                SeqRecord(
+                    Seq(filtered_sequence),
+                    id=record.id,
+                    name=record.name,
+                    description=record.description,
+                )
+            )
+        MSA_mafft_filtered = MultipleSeqAlignment(filtered_records)
 
         # Write the filtered MSA to the output file
         with open(output_file, 'w') as f:
